@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Québec City Weather Aggregator</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">No-key public weather data</p>
+          <h1>Québec City Vacation Weather Aggregator</h1>
+          <p class="lede">
+            Compares public model forecasts for Old Québec, July 1–5, and scores
+            realistic outdoor walking windows instead of just daily rain icons.
+          </p>
+        </div>
+        <button id="refreshButton" type="button">Fetch latest</button>
+      </header>
+
+      <section class="controls" aria-label="Forecast controls">
+        <label>
+          Latitude
+          <input id="latitude" type="number" step="0.0001" value="46.8139" />
+        </label>
+        <label>
+          Longitude
+          <input id="longitude" type="number" step="0.0001" value="-71.2080" />
+        </label>
+        <label>
+          Start date
+          <input id="startDate" type="date" value="2026-07-01" />
+        </label>
+        <label>
+          End date
+          <input id="endDate" type="date" value="2026-07-05" />
+        </label>
+      </section>
+
+      <section class="notice" id="status" role="status">
+        Press “Fetch latest” to pull public forecast data directly from your browser.
+      </section>
+
+      <section class="summaryGrid" id="summaryGrid" aria-live="polite"></section>
+
+      <section class="insightGrid" aria-live="polite">
+        <section class="panel compactPanel">
+          <h2>Best windows to explore</h2>
+          <ul id="bestWindows" class="insightList"></ul>
+        </section>
+        <section class="panel compactPanel">
+          <h2>What the models agree on</h2>
+          <ul id="modelAgreement" class="insightList"></ul>
+        </section>
+        <section class="panel compactPanel">
+          <h2>How to use this</h2>
+          <p class="helpText">
+            Look for long green stretches, not just isolated green hours. Yellow is
+            still usable with a flexible plan. Red means plan indoor activities.
+          </p>
+        </section>
+      </section>
+
+      <section class="panel">
+        <div class="panelHeader">
+          <div>
+            <h2>Hourly consensus</h2>
+            <p>
+              Scores prioritize continuous outdoor windows, thunderstorm agreement,
+              heat index, wind gusts, and rain spread across models.
+            </p>
+          </div>
+          <button id="exportButton" type="button" class="secondaryButton">Export CSV</button>
+        </div>
+        <div class="tableWrap">
+          <table id="hourlyTable">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Hour</th>
+                <th>Consensus</th>
+                <th>Temp</th>
+                <th>Feels</th>
+                <th>Humidity</th>
+                <th>Wind gust</th>
+                <th>Rain signal</th>
+                <th>Storm</th>
+                <th>Confidence</th>
+                <th>Sources</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Source health</h2>
+        <ul id="sourceHealth" class="sourceHealth"></ul>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
