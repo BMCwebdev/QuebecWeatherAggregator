@@ -13,8 +13,9 @@
           <p class="eyebrow">No-key public weather data</p>
           <h1>Vacation Weather Aggregator</h1>
           <p class="lede">
-            Compares public model forecasts for any city worldwide and scores
-            realistic outdoor walking windows instead of just daily rain icons.
+            Aggregates several independent public forecast models for any city
+            and reports hourly outdoor conditions and how much the models agree.
+            The numbers are inputs for your own decision, not a recommendation.
           </p>
         </div>
         <button id="refreshButton" type="button">Fetch latest</button>
@@ -64,6 +65,8 @@
         Loading forecast…
       </section>
 
+      <section class="panel verdictPanel" id="verdict" hidden aria-live="polite"></section>
+
       <section class="summaryGrid" id="summaryGrid" aria-live="polite"></section>
 
       <section class="insightGrid" aria-live="polite">
@@ -76,10 +79,14 @@
           <ul id="modelAgreement" class="insightList"></ul>
         </section>
         <section class="panel compactPanel">
-          <h2>How to use this</h2>
+          <h2>Reading this data</h2>
           <p class="helpText">
-            Look for long green stretches, not just isolated green hours. Yellow is
-            still usable with a flexible plan. Red means plan indoor activities.
+            Each hour has an outdoor comfort score (0–100) derived from rain,
+            feels-like temperature, humidity, wind gusts, and thunderstorm
+            agreement across models. Continuous favorable blocks matter more than
+            scattered single hours. Where model agreement is low, the models have
+            not converged — treat those values as uncertain. The scoring formula
+            is documented in <a href="llms.txt">llms.txt</a>.
           </p>
         </section>
       </section>
@@ -90,10 +97,14 @@
             <h2>Hourly consensus</h2>
             <p>
               Scores prioritize continuous outdoor windows, thunderstorm agreement,
-              heat index, wind gusts, and rain spread across models.
+              heat index, wind gusts, and rain spread across models. Expand a
+              “models” cell to see each model side by side.
             </p>
           </div>
-          <button id="exportButton" type="button" class="secondaryButton">Export CSV</button>
+          <div class="exportButtons">
+            <button id="exportButton" type="button" class="secondaryButton">Export CSV</button>
+            <button id="exportJsonButton" type="button" class="secondaryButton">Export JSON</button>
+          </div>
         </div>
         <div class="tableWrap">
           <table id="hourlyTable">
@@ -108,7 +119,7 @@
                 <th>Wind gust</th>
                 <th>Rain signal</th>
                 <th>Storm</th>
-                <th>Confidence</th>
+                <th>Model agreement</th>
                 <th>Sources</th>
               </tr>
             </thead>
@@ -121,8 +132,41 @@
         <h2>Source health</h2>
         <ul id="sourceHealth" class="sourceHealth"></ul>
       </section>
+
+      <section class="panel agentPanel">
+        <h2>For AI agents</h2>
+        <p class="helpText">
+          Preferred path: fetch the server-rendered JSON below. It is computed by
+          the site's Worker (which queries the models server-side), so it works
+          even when your sandbox blocks external weather APIs or cannot run
+          JavaScript. All endpoints are same-origin, need no key, and send
+          <code>Access-Control-Allow-Origin: *</code>. The links follow the
+          location and dates currently shown on this page.
+        </p>
+        <ul class="helpList">
+          <li><a href="forecast/index.json" data-forecast-link="forecast/index.json"><code>/forecast/index.json</code></a> —
+            small index: decision summary, per-day rollups, and links to per-day files.</li>
+          <li><a href="forecast.json" data-forecast-link="forecast.json"><code>/forecast.json</code></a> — full run:
+            decision summary, per-day rollups, and every daytime hour with
+            consensus, model spread (min/max/median), and the best_match blend.</li>
+          <li><code>/forecast/YYYY-MM-DD.json</code> — one day with the full
+            per-model breakdown; <code>.summary.json</code> for the smaller version.</li>
+          <li>Any location: add <code>?city=Burlington, VT</code> or
+            <code>?lat=…&amp;lon=…</code>, and optionally
+            <code>&amp;start=YYYY-MM-DD&amp;end=YYYY-MM-DD</code>. Defaults are
+            Québec, today and tomorrow.</li>
+          <li><a href="llms.txt"><code>/llms.txt</code></a> — protocol doc: schema,
+            field meanings, scoring formula, and how model agreement is defined.</li>
+        </ul>
+        <p class="helpText">
+          If you are running this page in a browser instead, the same payload is at
+          <code>window.__WEATHER_FORECAST__</code> and in the
+          <code>&lt;script id="forecastData"&gt;</code> tag, or use “Export JSON”.
+        </p>
+      </section>
     </main>
 
-    <script src="app.js"></script>
+    <script id="forecastData" type="application/json">null</script>
+    <script type="module" src="app.js"></script>
   </body>
 </html>

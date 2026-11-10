@@ -1,0 +1,164 @@
+# Weather Aggregator — Agent Protocol
+
+This site aggregates multiple public, no-API-key weather forecast models for one
+kind of decision: whether outdoor conditions at a chosen place and date range are
+favorable. It does not make the decision. It assembles the inputs.
+
+This file is an index and protocol doc. The data lives in the JSON endpoints below.
+URLs here are relative to the origin this file was served from.
+
+## Fetch the data (preferred)
+
+Served by the site's Cloudflare Worker, which queries the models server-side.
+Same-origin, no key, `Access-Control-Allow-Origin: *`, pretty-printed JSON. They
+work even if your environment blocks external weather APIs (e.g. api.open-meteo.com)
+or cannot run JavaScript.
+
+Start here — the index lists ABSOLUTE links to every per-day file, so a single
+fetch gives you URLs your fetch tool will accept:
+
+  /forecast/index.json
+
+Other endpoints:
+
+  /forecast.json                       all days: every daytime hour's consensus +
+                                       spread, no per-model arrays
+  /forecast/YYYY-MM-DD.summary.json    one day: per-hour consensus + model spread
+  /forecast/YYYY-MM-DD.json            one day: every model's hourly values, for
+                                       model-by-model attribution
+
+## Choosing the place and dates
+
+Query params, accepted by every endpoint:
+
+- `city` — "City", "City, State" or "City, Country", e.g. `?city=Burlington, VT`
+  or `?city=Lyon, France`. US state and Canadian province abbreviations work.
+  The best match is used and echoed back in `location.name`; check it.
+- `lat` + `lon` — decimal degrees, used when `city` is absent.
+- `start` + `end` — `YYYY-MM-DD`, both required if either is given.
+
+Defaults: Québec City, Canada (lat 46.8139, lon -71.2080), today and tomorrow in
+the location's own timezone.
+
+Date limits: the underlying models only cover a rolling window from about 92 days
+in the past to 15 days in the future. Outside it you get HTTP 400 with
+`error: "invalid_dates"` or `"dates_out_of_range"`. Later dates become available
+as they come within 15 days. Other errors: 404 `city_not_found`, 400
+`invalid_coordinates`, 502 `forecast_failed` (upstream trouble — retry). A per-day
+URL for a date outside the requested range returns `error: "date_not_found"` with
+the list of `available` dates.
+
+The per-day links in `perDayFiles` carry the same query params you sent, so they
+stay aimed at the same place and dates.
+
+Always pull fresh. There is NO server-side caching — every request rebuilds from
+the latest Open-Meteo data and is returned with `Cache-Control: no-store`. If your
+own fetch tool caches responses by URL, append a throwaway query param such as
+`&t=1719700000`; unknown params are ignored by the server. `generatedAt` (ISO)
+stamps each build; `snapshotHash` tells you if anything actually changed.
+
+## If you are running the page in a browser instead
+
+The same full payload is at `window.__WEATHER_FORECAST__` after a forecast loads,
+and in the `<script id="forecastData" type="application/json">` tag. "Export JSON"
+downloads it. Fetching the raw HTML alone returns empty tables — the UI renders
+client-side.
+
+## Context
+
+- Location, timezone and date range are echoed in every payload under `location`
+  and `range`. All times are local to the location.
+- Units: temperature °F, wind mph, precipitation inch.
+- Only daytime hours (08:00–21:00 local) are scored and returned.
+
+## Data sources
+
+Open-Meteo serves several independent models behind one endpoint. We query and
+compare these. `best_match` is Open-Meteo's blend and is reported separately —
+spread is computed across the 8 independent models only, so the blend never
+narrows the honest range.
+
+- best_match (blend — excluded from spread)
+- ecmwf_ifs025, gfs_global, gem_global, icon_global  (physics models)
+- ecmwf_aifs025, gfs_graphcast025  (ML models)
+- ukmo_global_deterministic_10km, meteofrance_arpege_world
+
+Environment Canada's city page collection is queried only as a source-health
+sanity check, not scored. It appears in `sourceHealth` only when the location
+has a nearby Canadian city page.
+
+## JSON schema (key fields)
+
+Top level: `generatedAt`, `snapshotHash`, `location`, `range`, `units`,
+`sourceCount`, `independentCount`, `note`, `verdict`, `days[]`, `hours[]`,
+`sourceHealth[]`.
+
+`snapshotHash` is a 64-bit content hash of the decision-relevant outputs (rounded,
+so trivial float jitter doesn't flip it). Use it two ways: (1) two files with the
+same hash describe the same forecast run, so index and a summary fetched together
+should match — if they don't, refetch; (2) compare against the hash from your last
+fetch to know whether the forecast materially changed or is just noise. Same hash =
+nothing decision-relevant moved, even if generatedAt is newer.
+
+`verdict`: `signal` (one of: mostly favorable | leaning favorable | mixed |
+mostly unfavorable — a neutral description of the data, not advice),
+`avgTripScore`, `favorableDays`, `comfortableDays`, `poorDays`,
+`comfortableHours`, `stormDays[]` (ISO dates), `lowAgreementDays`, `facts[]`.
+
+`days[]` per day: `date`, `avgScore` (0–100), `rating`, `label`, `excellentHours`
+(score ≥75), `goodHours` (score ≥60), `excellentStretch`/`goodStretch` (longest
+continuous hours), `maxFeels` °F, `maxGust` mph, `avgHumidity` %, `agreement`
+(high|medium|low|insufficient sources), `stormPeak` (max models agreeing on a
+thunderstorm in any hour), `stormStart`, `periods[]` (morning/afternoon/evening
+scores), `bestExcellentWindow`/`bestGoodWindow`, `planLine` (factual summary).
+
+`hours[]` per daytime hour: `time` (local ISO), `date`, `hour`, `score`, `rating`,
+`label`, `temp`, `feels`, `humidity`, `windGusts`, `rainSignal` (mean rain prob %),
+`rainMin`/`rainMax`/`rainSpread`, `agreement`, `stormVotes`/`showerVotes` (model
+counts), `sourceCount`, `independentCount`,
+`spread`: `{ rainProb, feels, gust }`, each `{ min, max, median, n }` across
+independent models — `n` is how many models actually reported that metric this
+hour (some models return nulls for some fields, so n can be < independentCount;
+trust a spread less when n is small). `blend`: best_match's
+`{ feels, rainProb, windGusts, code }`. `models[]` (full per-day files only):
+each model's `{ id, label, independent, feels, rainProb, precip, showers, gust,
+humidity, code }`.
+
+`index.json`/`forecast.json` also carry `perDayFiles`: a map of date ->
+`{ summary, full }` absolute URLs. `summary`/`full` payloads carry `tier`.
+
+## How the comfort score works (heuristic, not a physical model)
+
+Each hour starts at 100 and subtracts penalties: mean rain probability ×0.48;
+measured precipitation (up to −35); showers (up to −25); a saturating thunderstorm
+penalty (WMO 95/96/99) of −16 for the first model reporting one and −7 for each
+further model, capped at −38; −4 per model reporting shower codes (80/81/82);
+apparent temp >88°F and >82°F penalties; humidity >82% penalty; wind gusts >24 mph
+(up to −14); −4 when models disagree strongly. Bands: ≥75 favorable, ≥60 generally
+comfortable, ≥42 mixed, <42 unfavorable. The score is tuned for warm-season
+walking comfort: it does not penalize cold, so read `temp`/`feels` directly in
+cold weather.
+
+Day score = 45% of the daytime hourly average + 30% of the average of the better
+half of the hours, plus a bonus for long CONTINUOUS comfortable/favorable blocks
+(a 4-hour clear stretch beats four scattered clear hours), minus small penalties
+for scattered good hours and for model disagreement.
+
+## Model agreement (not "confidence")
+
+`agreement` measures how much the independent models diverge for an hour/day — it
+says nothing about whether the forecast is correct, only how converged the models
+are. Derived from the standard deviation and range of rain probability plus the
+range of apparent temperature. Bands: high ≤25, medium ≤45, else low; with <3
+models, "insufficient sources". Low agreement = treat those values as soft,
+especially on later (further-out) days.
+
+## Suggested use
+
+1. Fetch `/forecast/index.json` for the shape, then per-day files as needed.
+2. Report the spread (min–max), not just the mean — the range is the honest signal.
+3. Flag hours where `stormVotes` ≥3.
+4. Call out low-`agreement` days as uncertain; note later dates have more lead time.
+5. Summarize per day: longest continuous comfortable block, peak feels-like, peak
+   gust, storm presence and timing.
+6. Present the numbers and let the human decide. Avoid prescriptive verdicts.

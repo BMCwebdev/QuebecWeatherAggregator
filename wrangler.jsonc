@@ -1,8 +1,11 @@
 {
-  // Static site: everything in ./public is served as-is.
+  // Static files in ./public are served first. Requests with no matching file
+  // (the /forecast* JSON endpoints) fall through to worker.js.
   "name": "weather-aggregator",
+  "main": "worker.js",
   "compatibility_date": "2026-11-01",
   "assets": {
-    "directory": "./public"
+    "directory": "./public",
+    "binding": "ASSETS"
   }
 }
