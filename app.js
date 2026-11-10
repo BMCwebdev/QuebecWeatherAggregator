@@ -1,4 +1,5 @@
 const OPEN_METEO_BASE = 'https://api.open-meteo.com/v1/forecast';
+const GEOCODING_BASE = 'https://geocoding-api.open-meteo.com/v1/search';
 const EC_CITY_PAGE = 'https://api.weather.gc.ca/collections/citypageweather-realtime/items';
 
 const OPEN_METEO_SOURCES = [
@@ -30,12 +31,47 @@ const hourlyVariables = [
 const $ = (selector) => document.querySelector(selector);
 let latestHours = [];
 
-$('#refreshButton').addEventListener('click', () => {
+// Open-Meteo's forecast endpoint only serves a rolling window around today.
+const FORECAST_DAYS_BACK = 92;
+const FORECAST_DAYS_AHEAD = 15;
+
+// Lets "Burlington, VT" match the geocoder's full region names.
+const REGION_ABBREVIATIONS = {
+  al: 'alabama', ak: 'alaska', az: 'arizona', ar: 'arkansas', ca: 'california', co: 'colorado',
+  ct: 'connecticut', de: 'delaware', dc: 'district of columbia', fl: 'florida', ga: 'georgia',
+  hi: 'hawaii', id: 'idaho', il: 'illinois', in: 'indiana', ia: 'iowa', ks: 'kansas', ky: 'kentucky',
+  la: 'louisiana', me: 'maine', md: 'maryland', ma: 'massachusetts', mi: 'michigan', mn: 'minnesota',
+  ms: 'mississippi', mo: 'missouri', mt: 'montana', ne: 'nebraska', nv: 'nevada', nh: 'new hampshire',
+  nj: 'new jersey', nm: 'new mexico', ny: 'new york', nc: 'north carolina', nd: 'north dakota',
+  oh: 'ohio', ok: 'oklahoma', or: 'oregon', pa: 'pennsylvania', ri: 'rhode island',
+  sc: 'south carolina', sd: 'south dakota', tn: 'tennessee', tx: 'texas', ut: 'utah', vt: 'vermont',
+  va: 'virginia', wa: 'washington', wv: 'west virginia', wi: 'wisconsin', wy: 'wyoming',
+  ab: 'alberta', bc: 'british columbia', mb: 'manitoba', nb: 'new brunswick',
+  nl: 'newfoundland and labrador', ns: 'nova scotia', nt: 'northwest territories', nu: 'nunavut',
+  on: 'ontario', pe: 'prince edward island', qc: 'quebec', sk: 'saskatchewan', yt: 'yukon',
+};
+
+let locationLabel = 'Québec, Quebec, Canada';
+let locationNeedsLookup = false;
+let suggestionItems = [];
+let activeSuggestion = -1;
+let suggestionTimer = null;
+let suggestionRequest = 0;
+
+initDates();
+initLocationControls();
+
+$('#refreshButton').addEventListener('click', refresh);
+refresh();
+
+function refresh() {
+  $('#status').classList.remove('error');
   fetchAndRender().catch((error) => {
     $('#status').textContent = `Could not build forecast: ${error.message}`;
+    $('#status').classList.add('error');
     $('#refreshButton').disabled = false;
   });
-});
+}
 
 $('#exportButton')?.addEventListener('click', () => exportCsv(latestHours));
 
@@ -44,7 +80,7 @@ async function fetchAndRender() {
   button.disabled = true;
   $('#status').textContent = 'Fetching public forecast sources…';
 
-  const params = getControls();
+  const params = await getControls();
   const [openMeteoResults, environmentCanadaResult] = await Promise.all([
     Promise.allSettled(OPEN_METEO_SOURCES.map((source) => fetchOpenMeteo(source, params))),
     fetchEnvironmentCanada(params).then(
@@ -67,8 +103,12 @@ async function fetchAndRender() {
     }
   }
 
+  // Regional source: only reported when the location has a nearby Canadian city page.
+  const hasRegionalSource = environmentCanadaResult.status === 'rejected' || environmentCanadaResult.value !== null;
   if (environmentCanadaResult.status === 'fulfilled') {
-    health.push({ label: 'Environment Canada city page', ok: true, message: environmentCanadaResult.value.summary });
+    if (environmentCanadaResult.value) {
+      health.push({ label: 'Environment Canada city page', ok: true, message: environmentCanadaResult.value.summary });
+    }
   } else {
     health.push({ label: 'Environment Canada city page', ok: false, message: environmentCanadaResult.reason.message });
   }
@@ -82,17 +122,217 @@ async function fetchAndRender() {
   renderHealth(health);
 
   const usableSources = sources.length;
-  $('#status').textContent = `Updated ${new Date().toLocaleString()}. Aggregated ${usableSources} model source${usableSources === 1 ? '' : 's'} from Open-Meteo, plus Environment Canada source health. Extra models may fail gracefully if a provider does not cover the selected dates or variables.`;
+  if (!usableSources) {
+    const reason = health.find((item) => !item.ok)?.message ?? 'unknown error';
+    throw new Error(`no forecast source returned data (${reason})`);
+  }
+  $('#status').textContent = `Updated ${new Date().toLocaleString()} for ${params.label}. Aggregated ${usableSources} model source${usableSources === 1 ? '' : 's'} from Open-Meteo${hasRegionalSource ? ', plus Environment Canada source health' : ''}. Extra models may fail gracefully if a provider does not cover the selected dates or variables.`;
   button.disabled = false;
 }
 
-function getControls() {
-  return {
-    latitude: Number($('#latitude').value),
-    longitude: Number($('#longitude').value),
-    startDate: $('#startDate').value,
-    endDate: $('#endDate').value,
-  };
+function toDateInputValue(date) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function daysFromToday(offset) {
+  const date = new Date();
+  date.setDate(date.getDate() + offset);
+  return toDateInputValue(date);
+}
+
+function initDates() {
+  const start = $('#startDate');
+  const end = $('#endDate');
+  start.value = daysFromToday(0);
+  end.value = daysFromToday(1);
+  for (const input of [start, end]) {
+    input.min = daysFromToday(-FORECAST_DAYS_BACK);
+    input.max = daysFromToday(FORECAST_DAYS_AHEAD);
+  }
+  start.addEventListener('change', () => {
+    if (start.value && end.value < start.value) end.value = start.value;
+  });
+}
+
+function initLocationControls() {
+  const input = $('#locationInput');
+
+  input.addEventListener('input', () => {
+    locationNeedsLookup = true;
+    clearTimeout(suggestionTimer);
+    const query = input.value.trim();
+    if (query.length < 2) return hideSuggestions();
+    suggestionTimer = setTimeout(async () => {
+      const request = ++suggestionRequest;
+      try {
+        const results = await geocode(query);
+        if (request === suggestionRequest && locationNeedsLookup) showSuggestions(results);
+      } catch {
+        hideSuggestions();
+      }
+    }, 250);
+  });
+
+  input.addEventListener('keydown', (event) => {
+    const open = !$('#locationSuggestions').hidden;
+    if (event.key === 'ArrowDown' && open) {
+      event.preventDefault();
+      setActiveSuggestion((activeSuggestion + 1) % suggestionItems.length);
+    } else if (event.key === 'ArrowUp' && open) {
+      event.preventDefault();
+      setActiveSuggestion((activeSuggestion - 1 + suggestionItems.length) % suggestionItems.length);
+    } else if (event.key === 'Escape') {
+      hideSuggestions();
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      if (open && activeSuggestion >= 0) selectLocation(suggestionItems[activeSuggestion]);
+      else hideSuggestions();
+      refresh();
+    }
+  });
+
+  input.addEventListener('blur', () => setTimeout(hideSuggestions, 150));
+
+  for (const id of ['#latitude', '#longitude']) {
+    $(id).addEventListener('input', () => {
+      locationNeedsLookup = false;
+      locationLabel = `${$('#latitude').value}, ${$('#longitude').value}`;
+      setResolved(`Using custom coordinates (${locationLabel})`);
+      updateTitle();
+    });
+  }
+}
+
+async function geocode(text) {
+  const [name, ...qualifiers] = text.split(',').map((part) => part.trim()).filter(Boolean);
+  if (!name) return [];
+  const url = new URL(GEOCODING_BASE);
+  url.searchParams.set('name', name);
+  url.searchParams.set('count', '25');
+  url.searchParams.set('language', 'en');
+  url.searchParams.set('format', 'json');
+
+  const response = await fetch(url.toString());
+  if (!response.ok) throw new Error(`Location search failed (${response.status})`);
+  const data = await response.json();
+
+  return (data.results ?? [])
+    .filter((place) => qualifiers.every((qualifier) => matchesQualifier(place, qualifier)))
+    .slice(0, 8)
+    .map((place) => ({
+      label: [place.name, place.admin1 === place.name ? null : place.admin1, place.country].filter(Boolean).join(', '),
+      latitude: place.latitude,
+      longitude: place.longitude,
+    }));
+}
+
+function normalizeText(value) {
+  return String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+
+function matchesQualifier(place, qualifier) {
+  const wanted = normalizeText(qualifier).replaceAll('.', '');
+  const expanded = REGION_ABBREVIATIONS[wanted];
+  const region = normalizeText(place.admin1);
+  const country = normalizeText(place.country);
+  const countryCode = normalizeText(place.country_code);
+  if (expanded && region === expanded) return true;
+  if (wanted === countryCode || (wanted === 'usa' && countryCode === 'us') || (wanted === 'uk' && countryCode === 'gb')) return true;
+  return wanted.length >= 3 && (region.startsWith(wanted) || country.startsWith(wanted));
+}
+
+function showSuggestions(items) {
+  const list = $('#locationSuggestions');
+  suggestionItems = items;
+  activeSuggestion = -1;
+  if (!items.length) {
+    list.innerHTML = '<li aria-disabled="true">No matching places</li>';
+  } else {
+    list.innerHTML = items.map((item, index) => `
+      <li role="option" id="suggestion-${index}" data-index="${index}" aria-selected="false">${escapeHtml(item.label)}</li>
+    `).join('');
+    for (const option of list.querySelectorAll('[data-index]')) {
+      // mousedown fires before the input's blur hides the list
+      option.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        selectLocation(suggestionItems[Number(option.dataset.index)]);
+        refresh();
+      });
+    }
+  }
+  list.hidden = false;
+  $('#locationInput').setAttribute('aria-expanded', 'true');
+}
+
+function setActiveSuggestion(index) {
+  if (!suggestionItems.length) return;
+  activeSuggestion = index;
+  for (const option of $('#locationSuggestions').querySelectorAll('[data-index]')) {
+    option.setAttribute('aria-selected', String(Number(option.dataset.index) === index));
+  }
+  $('#locationInput').setAttribute('aria-activedescendant', `suggestion-${index}`);
+}
+
+function hideSuggestions() {
+  clearTimeout(suggestionTimer);
+  suggestionRequest += 1;
+  suggestionItems = [];
+  activeSuggestion = -1;
+  $('#locationSuggestions').hidden = true;
+  $('#locationInput').setAttribute('aria-expanded', 'false');
+  $('#locationInput').removeAttribute('aria-activedescendant');
+}
+
+function selectLocation(place) {
+  $('#locationInput').value = place.label;
+  $('#latitude').value = place.latitude.toFixed(4);
+  $('#longitude').value = place.longitude.toFixed(4);
+  locationLabel = place.label;
+  locationNeedsLookup = false;
+  setResolved(`${place.label} (${place.latitude.toFixed(4)}, ${place.longitude.toFixed(4)})`);
+  hideSuggestions();
+  updateTitle();
+}
+
+function updateTitle() {
+  document.title = `${locationLabel.split(',')[0]} · Weather Aggregator`;
+}
+
+function setResolved(text, isError = false) {
+  const resolved = $('#locationResolved');
+  resolved.textContent = text;
+  resolved.classList.toggle('error', isError);
+}
+
+async function getControls() {
+  if (locationNeedsLookup) {
+    const query = $('#locationInput').value.trim();
+    const [match] = query ? await geocode(query) : [];
+    if (!match) {
+      setResolved(`No place found for “${query}”. Try “City, State”.`, true);
+      throw new Error(`could not find a place called “${query}”`);
+    }
+    selectLocation(match);
+  }
+
+  const latitude = Number($('#latitude').value);
+  const longitude = Number($('#longitude').value);
+  const startDate = $('#startDate').value;
+  const endDate = $('#endDate').value;
+
+  if ($('#latitude').value === '' || $('#longitude').value === '' || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
+    throw new Error('latitude must be between -90 and 90 and longitude between -180 and 180');
+  }
+  if (!startDate || !endDate) throw new Error('pick a start and end date');
+  if (endDate < startDate) throw new Error('the end date is before the start date');
+  const earliest = daysFromToday(-FORECAST_DAYS_BACK);
+  const latest = daysFromToday(FORECAST_DAYS_AHEAD);
+  if (startDate < earliest || endDate > latest) {
+    throw new Error(`forecast data is only available from ${earliest} to ${latest}; pick dates inside that range`);
+  }
+
+  return { latitude, longitude, startDate, endDate, label: locationLabel };
 }
 
 async function fetchOpenMeteo(source, params) {
@@ -103,13 +343,21 @@ async function fetchOpenMeteo(source, params) {
   url.searchParams.set('temperature_unit', 'fahrenheit');
   url.searchParams.set('wind_speed_unit', 'mph');
   url.searchParams.set('precipitation_unit', 'inch');
-  url.searchParams.set('timezone', 'America/Toronto');
+  url.searchParams.set('timezone', 'auto');
   url.searchParams.set('start_date', params.startDate);
   url.searchParams.set('end_date', params.endDate);
   if (source.model) url.searchParams.set('models', source.model);
 
-  const response = await fetch(url.toString());
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  // Open-Meteo rate-limits bursts of parallel requests; back off and retry.
+  let response = await fetch(url.toString());
+  for (let attempt = 1; response.status === 429 && attempt <= 3; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
+    response = await fetch(url.toString());
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.reason ?? `${response.status} ${response.statusText}`);
+  }
   const data = await response.json();
   if (!data.hourly?.time?.length) throw new Error('No hourly data returned');
 
@@ -150,13 +398,15 @@ async function fetchEnvironmentCanada(params) {
   const response = await fetch(url.toString());
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   const data = await response.json();
-  const feature = data.features?.find((item) => {
-    const properties = item.properties ?? {};
-    return JSON.stringify(properties).toLowerCase().includes('québec') ||
-      JSON.stringify(properties).toLowerCase().includes('quebec');
-  }) ?? data.features?.[0];
+  const distanceTo = (item) => {
+    const [lon, lat] = item.geometry?.coordinates ?? [];
+    return typeof lon === 'number' && typeof lat === 'number'
+      ? Math.hypot(lon - params.longitude, lat - params.latitude)
+      : Infinity;
+  };
+  const feature = [...(data.features ?? [])].sort((a, b) => distanceTo(a) - distanceTo(b))[0];
 
-  if (!feature) throw new Error('No nearby city page item returned');
+  if (!feature) return null;
   const properties = feature.properties ?? {};
   const name = properties.name?.en ?? properties.name ?? properties.locationName ?? properties.city ?? 'nearby city';
   return { summary: `Fetched public city forecast item for ${typeof name === 'object' ? JSON.stringify(name) : name}` };
@@ -542,7 +792,8 @@ function exportCsv(hours) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = 'quebec-weather-consensus.csv';
+  const slug = normalizeText(locationLabel.split(',')[0]).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'location';
+  link.download = `${slug}-weather-consensus.csv`;
   link.click();
   URL.revokeObjectURL(url);
 }
