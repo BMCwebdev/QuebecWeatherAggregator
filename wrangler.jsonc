@@ -1,0 +1,8 @@
+{
+  // Static site: everything in ./public is served as-is.
+  "name": "weather-aggregator",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./public"
+  }
+}
